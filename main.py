@@ -137,13 +137,28 @@ class UpdateSource:
                 test_result = {}
                 if config.open_speed_test:
                     urls_total = get_urls_len(self.channel_data)
+                    # Create a deep copy but don't filter channels - test all of them
                     test_data = copy.deepcopy(self.channel_data)
-                    process_nested_dict(
-                        test_data,
-                        seen=set(),
-                        filter_host=config.speed_test_filter_host,
-                        ipv6_support=self.ipv6_support
-                    )
+                    
+                    # Only remove duplicates, don't filter by IPv6 support or host
+                    # We'll handle IPv6 properly in the speed test function
+                    seen_urls = set()
+                    for category, channel_obj in test_data.items():
+                        for name, info_list in channel_obj.items():
+                            unique_list = []
+                            for item in info_list:
+                                # Keep whitelist, live, and hls sources as they don't need speed testing
+                                if item["origin"] in ["whitelist", "live", "hls"]:
+                                    continue
+                                
+                                # Remove URL duplicates but keep IPv6 channels for testing
+                                url = item["url"]
+                                if url not in seen_urls:
+                                    seen_urls.add(url)
+                                    unique_list.append(item)
+                            
+                            test_data[category][name] = unique_list
+                    
                     self.total = get_urls_len(test_data)
                     print(f"Total urls: {urls_total}, need to test speed: {self.total}")
                     self.update_progress(
@@ -159,6 +174,8 @@ class UpdateSource:
                     )
                     cache_result = merge_objects(cache_result, test_result, match_key="url")
                     self.pbar.close()
+                
+                # Sort and filter results, removing duplicates by channel name and keeping the best ones
                 self.channel_data = sort_channel_result(
                     self.channel_data,
                     result=test_result,

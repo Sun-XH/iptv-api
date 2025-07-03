@@ -350,8 +350,25 @@ async def get_speed(data, headers=None, ipv6_proxy=None, filter_resolution=open_
         if cache_key and cache_key in cache:
             result = get_avg_result(cache[cache_key])
         else:
-            if data['ipv_type'] == "ipv6" and ipv6_proxy:
-                result.update(default_ipv6_result)
+            # Test IPv6 channels properly instead of giving them default values
+            if data['ipv_type'] == "ipv6":
+                # For IPv6 channels, try to test them normally first
+                # If the system doesn't support IPv6, this will fail and we'll fall back to defaults
+                try:
+                    if constants.rt_url_pattern.match(url) is not None:
+                        start_time = time()
+                        if not result['resolution'] and filter_resolution:
+                            result['resolution'] = await get_resolution_ffprobe(url, headers, timeout)
+                        result['delay'] = int(round((time() - start_time) * 1000))
+                        if result['resolution'] is not None:
+                            result['speed'] = float("inf")
+                    else:
+                        result.update(await get_result(url, headers, resolution, filter_resolution, timeout))
+                except Exception:
+                    # If IPv6 testing fails and we have a proxy, use default values
+                    if ipv6_proxy:
+                        result.update(default_ipv6_result)
+                    # If no proxy, keep the failed result (delay = -1) so it gets filtered out
             elif constants.rt_url_pattern.match(url) is not None:
                 start_time = time()
                 if not result['resolution'] and filter_resolution:

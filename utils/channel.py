@@ -266,9 +266,9 @@ def get_channel_multicast_region_type_list(result):
         for region_type in result.values()
         for region, types in region_type.items()
         if "all" in region_list
-           or "ALL" in region_list
-           or "全部" in region_list
-           or region in region_list
+        or "ALL" in region_list
+        or "全部" in region_list
+        or region in region_list
         for r_type in types
     }
     return list(region_type_list)
@@ -761,35 +761,120 @@ async def test_speed(data, ipv6=False, callback=None):
 
 def sort_channel_result(channel_data, result=None, filter_host=False, ipv6_support=True):
     """
-    Sort channel result
+    Sort channel result and remove duplicates, keeping the best channels
     """
     channel_result = defaultdict(lambda: defaultdict(list))
     logger = get_logger(constants.result_log_path, level=INFO, init=True)
+    
     for cate, obj in channel_data.items():
         for name, values in obj.items():
             if not values:
                 continue
-            whitelist_result = []
-            test_result = result.get(cate, {}).get(name, []) if result else []
+                
+            # Collect all channels (tested and untested)
+            all_channels = []
+            
+            # Add untested channels (whitelist, live, hls)
             for value in values:
-                if value["origin"] in ["whitelist", "live", "hls"] or (
-                        not ipv6_support and result and value["ipv_type"] == "ipv6"
-                ):
-                    whitelist_result.append(value)
-                elif filter_host or not result:
-                    test_result.append({**value, **get_speed_result(value["host"])} if filter_host else value)
-            total_result = whitelist_result + get_sort_result(test_result, ipv6_support=ipv6_support)
+                if value["origin"] in ["whitelist", "live", "hls"]:
+                    all_channels.append(value)
+            
+            # Add tested channels with their speed test results
+            test_result = result.get(cate, {}).get(name, []) if result else []
+            for tested_channel in test_result:
+                # Only include channels that passed the speed test (delay != -1)
+                if tested_channel.get('delay', -1) != -1:
+                    all_channels.append(tested_channel)
+            
+            # Add untested channels if no result available
+            if not result:
+                for value in values:
+                    if value["origin"] not in ["whitelist", "live", "hls"]:
+                        if filter_host:
+                            value.update(get_speed_result(value["host"]))
+                        all_channels.append(value)
+            
+            # Remove duplicates and keep the best channels
+            unique_channels = {}
+            for channel in all_channels:
+                url = channel.get('url', '')
+                
+                # Skip IPv6 channels if not supported
+                if not ipv6_support and channel.get('ipv_type') == 'ipv6':
+                    continue
+                
+                # Use URL as the key for duplicate detection
+                if url not in unique_channels:
+                    unique_channels[url] = channel
+                else:
+                    # Keep the better channel (higher speed, lower delay, better origin)
+                    existing = unique_channels[url]
+                    current = channel
+                    
+                    # Priority order: whitelist > live > hls > others
+                    origin_priority = {
+                        'whitelist': 4,
+                        'live': 3, 
+                        'hls': 2,
+                        'subscribe': 1,
+                        'hotel': 1,
+                        'multicast': 1,
+                        'online_search': 1,
+                        'local': 1
+                    }
+                    
+                    existing_priority = origin_priority.get(existing.get('origin', ''), 0)
+                    current_priority = origin_priority.get(current.get('origin', ''), 0)
+                    
+                    if current_priority > existing_priority:
+                        unique_channels[url] = current
+                    elif current_priority == existing_priority:
+                        # Same priority, compare by speed and delay
+                        existing_speed = existing.get('speed', 0) or 0
+                        current_speed = current.get('speed', 0) or 0
+                        existing_delay = existing.get('delay', -1)
+                        current_delay = current.get('delay', -1)
+                        
+                        # Prefer channels with valid delay first
+                        if existing_delay == -1 and current_delay != -1:
+                            unique_channels[url] = current
+                        elif existing_delay != -1 and current_delay == -1:
+                            pass  # Keep existing
+                        elif existing_delay != -1 and current_delay != -1:
+                            # Both have valid delays, compare speed and delay
+                            if (current_speed > existing_speed or 
+                                (current_speed == existing_speed and current_delay < existing_delay)):
+                                unique_channels[url] = current
+            
+            # Sort channels by quality (speed desc, delay asc, origin priority)
+            sorted_channels = sorted(
+                unique_channels.values(),
+                key=lambda x: (
+                    origin_priority.get(x.get('origin', ''), 0),  # Origin priority
+                    x.get('speed', 0) or 0,  # Speed (higher is better)
+                    -(x.get('delay', 999999) if x.get('delay', -1) != -1 else 999999)  # Delay (lower is better)
+                ),
+                reverse=True
+            )
+            
+            # Apply limits and filters
+            final_channels = get_sort_result(sorted_channels, ipv6_support=ipv6_support)
+            
+            # Add to result
             append_data_to_info_data(
                 channel_result,
                 cate,
                 name,
-                total_result,
+                final_channels,
                 check=False,
             )
-            for item in total_result:
+            
+            # Log results
+            for item in final_channels:
                 logger.info(
-                    f"Name: {name}, URL: {item.get('url')}, IPv_Type: {item.get("ipv_type")}, Location: {item.get('location')}, ISP: {item.get('isp')}, Date: {item["date"]}, Delay: {item.get('delay') or -1} ms, Speed: {item.get('speed') or 0:.2f} M/s, Resolution: {item.get('resolution')}"
+                    f"Name: {name}, URL: {item.get('url')}, IPv_Type: {item.get('ipv_type')}, Location: {item.get('location')}, ISP: {item.get('isp')}, Date: {item.get('date')}, Delay: {item.get('delay') or -1} ms, Speed: {item.get('speed') or 0:.2f} M/s, Resolution: {item.get('resolution')}"
                 )
+    
     logger.handlers.clear()
     return channel_result
 
